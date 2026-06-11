@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Lectio Divina · Liturgia do Dia</title>
 <!-- Segurança -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; connect-src 'self' https://api.allorigins.win https://corsproxy.io https://liturgia.cancaonova.com https://www.cnbb.org.br; img-src 'self' data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; connect-src 'self' https://api.anthropic.com; img-src 'self' data:;">
 <meta http-equiv="X-Content-Type-Options" content="nosniff"/>
 <meta name="referrer" content="no-referrer"/>
 <!-- Performance: preconnect para fontes -->
@@ -415,139 +415,67 @@ function parseLiturgy(html){
   return readings.length?{feast,readings}:null;
 }
 
-/* ---- FETCH LITURGY (JSON APIs — sem scraping) ---- */
+/* ---- FETCH LITURGY via Claude AI ---- */
 async function fetchLiturgy(){
   const now=new Date();
-  const dia=now.getDate(),mes=String(now.getMonth()+1).padStart(2,'0'),ano=now.getFullYear();
-  const cacheKey=`liturgia_cache_${ano}-${mes}-${String(dia).padStart(2,'0')}`;
+  const dia=String(now.getDate()).padStart(2,'0');
+  const mes=String(now.getMonth()+1).padStart(2,'0');
+  const ano=now.getFullYear();
+  const cacheKey=`liturgia_cache_${ano}-${mes}-${dia}`;
 
-  // Cache: reuse se já foi carregado hoje
+  // Cache: reusa se já carregou hoje
   try{
     const cached=localStorage.getItem(cacheKey);
     if(cached){const p=JSON.parse(cached);if(p&&p.readings&&p.readings.length) return p;}
   }catch(_){}
 
-  const proxies=[
-    url=>`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
-    url=>`https://corsproxy.io/?url=${encodeURIComponent(url)}`,
-  ];
+  const dataStr=`${dia}/${mes}/${ano}`;
+  const prompt=`Você é um assistente católico. Forneça a liturgia católica romana completa do dia ${dataStr} (Brasil), baseada no Lecionário oficial da CNBB.
 
-  async function tryFetch(url,timeout=8000){
-    const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),timeout);
-    try{
-      const r=await fetch(url,{signal:controller.signal});
-      clearTimeout(timer);
-      return r.ok?r:null;
-    }catch(e){clearTimeout(timer);return null;}
-  }
+Responda APENAS com JSON válido, sem markdown, sem explicações, neste formato exato:
+{
+  "feast": "Nome da celebração/festa do dia",
+  "readings": [
+    {"label": "1ª Leitura", "ref": "referência bíblica ex: At 1,1-11", "text": "texto completo da leitura"},
+    {"label": "Salmo", "ref": "referência ex: Sl 46", "text": "texto do salmo responsorial com refrão"},
+    {"label": "2ª Leitura", "ref": "referência", "text": "texto (somente se houver)"},
+    {"label": "Evangelho", "ref": "referência ex: Lc 24,46-53", "text": "texto completo do evangelho"}
+  ]
+}
+Inclua apenas as leituras que existem para esse dia. Omita a 2ª Leitura se não houver (dias feriais). Os textos devem ser completos e fiéis ao Lecionário da CNBB.`;
 
-  async function proxyJSON(targetUrl){
-    for(const makeProxy of proxies){
-      const r=await tryFetch(makeProxy(targetUrl));
-      if(!r) continue;
-      const data=await r.json().catch(()=>null);
-      const body=data?.contents||data?.body||data;
-      if(body&&typeof body==='string'){
-        try{return JSON.parse(body);}catch(_){
-          // maybe it's HTML wrapped — return as string
-          return body;
-        }
-      }
-      if(body&&typeof body==='object') return body;
-    }
-    return null;
-  }
-
-  // === FONTE 1: API JSON da Canção Nova ===
-  try{
-    const jsonUrl=`https://liturgia.cancaonova.com/pb/json/?sDia=${dia}&sMes=${mes}&sAno=${ano}`;
-    const data=await proxyJSON(jsonUrl);
-    if(data&&typeof data==='object'&&(data.festivity||data.leituras||data.readings)){
-      const parsed=parseCNJson(data);
-      if(parsed&&parsed.readings.length){
-        try{localStorage.setItem(cacheKey,JSON.stringify(parsed));}catch(_){}
-        return parsed;
-      }
-    }
-  }catch(_){}
-
-  // === FONTE 2: API CNBB ===
-  try{
-    const cnbbUrl=`https://www.cnbb.org.br/liturgia-diaria/?data=${ano}-${mes}-${String(dia).padStart(2,'0')}`;
-    const html=await proxyJSON(cnbbUrl);
-    if(html&&typeof html==='string'&&html.length>200){
-      const parsed=parseLiturgy(html);
-      if(parsed&&parsed.readings.length){
-        try{localStorage.setItem(cacheKey,JSON.stringify(parsed));}catch(_){}
-        return parsed;
-      }
-    }
-  }catch(_){}
-
-  // === FONTE 3: Canção Nova scraping (fallback original) ===
-  const indexUrl=`https://liturgia.cancaonova.com/pb/?sDia=${dia}&sMes=${mes}&sAno=${ano}`;
-  const idxHtml=await proxyJSON(indexUrl);
-  if(!idxHtml||typeof idxHtml!=='string') throw new Error('Todas as fontes falharam');
-
-  const idxDoc=new DOMParser().parseFromString(idxHtml,'text/html');
-  let liturgyUrl=null;
-  idxDoc.querySelectorAll('a[href]').forEach(a=>{
-    const h=a.getAttribute('href')||'';
-    if(h.includes('/pb/liturgia/')&&h.includes(`sDia=${dia}`)&&h.includes(`sMes=${mes}`))
-      liturgyUrl=h;
+  const resp=await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      model:'claude-sonnet-4-20250514',
+      max_tokens:2000,
+      tools:[{type:'web_search_20250305',name:'web_search'}],
+      messages:[{role:'user',content:prompt}]
+    })
   });
-  if(!liturgyUrl){
-    idxDoc.querySelectorAll('td a[href]').forEach(a=>{
-      const h=a.getAttribute('href')||'';
-      if(a.textContent.trim()===String(dia)&&h.includes('/pb/liturgia/'))
-        liturgyUrl=h.includes('?')?h:`${h}?sDia=${dia}&sMes=${mes}&sAno=${ano}`;
-    });
-  }
-  if(!liturgyUrl) throw new Error('URL da liturgia não encontrada');
 
-  const litHtml=await proxyJSON(liturgyUrl);
-  if(!litHtml||typeof litHtml!=='string') throw new Error('Falha ao obter página da liturgia');
-  const parsed=parseLiturgy(litHtml);
-  if(!parsed||!parsed.readings.length) throw new Error('Falha ao interpretar a liturgia');
+  if(!resp.ok) throw new Error('Falha na API');
+  const data=await resp.json();
+
+  // Extrai o texto da resposta (pode ter múltiplos blocos por causa do web_search)
+  const text=data.content
+    .filter(b=>b.type==='text')
+    .map(b=>b.text)
+    .join('');
+
+  // Parse JSON — limpa possíveis marcadores markdown
+  const clean=text.replace(/```json|```/g,'').trim();
+  // Encontra o objeto JSON na resposta
+  const match=clean.match(/\{[\s\S]*\}/);
+  if(!match) throw new Error('JSON não encontrado na resposta');
+  const parsed=JSON.parse(match[0]);
+
+  if(!parsed.readings||!parsed.readings.length) throw new Error('Leituras não encontradas');
+
+  // Salva cache
   try{localStorage.setItem(cacheKey,JSON.stringify(parsed));}catch(_){}
   return parsed;
-}
-
-/* ---- PARSE DA API JSON DA CANÇÃO NOVA ---- */
-function parseCNJson(data){
-  // A API pode retornar diferentes estruturas — cobrimos as principais
-  const feast=data.festivity||data.feast||data.titulo||data.title||'';
-  const readings=[];
-
-  // Estrutura: data.leituras = [{titulo, referencia, texto}]
-  if(Array.isArray(data.leituras)){
-    data.leituras.forEach(l=>{
-      const label=l.titulo||l.label||l.tipo||'Leitura';
-      const ref=l.referencia||l.ref||'';
-      const text=(l.texto||l.text||'').replace(/^\d+\s*/gm,'').replace(/\n{3,}/g,'\n\n').trim();
-      if(text.length>30) readings.push({label,ref,text});
-    });
-  }
-
-  // Estrutura alternativa: data.primeiraLeitura, data.salmo, data.evangelho
-  if(!readings.length){
-    const map=[
-      ['primeiraLeitura','1ª Leitura'],
-      ['segundaLeitura','2ª Leitura'],
-      ['salmo','Salmo'],
-      ['evangelho','Evangelho'],
-    ];
-    map.forEach(([key,label])=>{
-      const block=data[key];
-      if(!block) return;
-      const ref=block.referencia||block.titulo||'';
-      const text=(block.texto||block.text||'').replace(/^\d+\s*/gm,'').replace(/\n{3,}/g,'\n\n').trim();
-      if(text.length>30) readings.push({label,ref,text});
-    });
-  }
-
-  return readings.length?{feast,readings}:null;
 }
 
 /* ---- RENDER READINGS ---- */
